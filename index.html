@@ -408,6 +408,7 @@ Behavioral rules:
     const buildProspectSystemPrompt = (persona) => {
       const difficulty = persona.difficulty || "Medium";
       const difficultyBlock = DIFFICULTY_INSTRUCTIONS[difficulty] || DIFFICULTY_INSTRUCTIONS.Medium;
+      const isReview = persona.meetingType === "review";
 
       let curriculumBlock = "";
       if (persona.focusStep && CURRICULUM_STEPS[persona.focusStep]) {
@@ -421,17 +422,39 @@ Open the conversation with one short turn that puts the advisor at this step in 
 This will be a SHORT focused session (~3-5 minutes). Stay engaged and let them practice this step.`;
       }
 
-      return `You are role-playing as a prospective wealth management client meeting a financial advisor from Corbett Road Wealth Management. You are evaluating whether to hire them.
+      // Review-mode-specific block: tells the AI to behave like an EXISTING client
+      const reviewBlock = isReview ? `
+
+THIS IS A REVIEW MEETING — YOU ARE AN EXISTING CLIENT:
+You are NOT a new prospect being pitched. You have been a client of Corbett Road Wealth Management for some time. You already know the advisor (or at least know them by name from prior meetings or as part of your account team). You don't need to be introduced to the firm or sold on hiring them — they're your advisor.
+
+YOUR HISTORY WITH THE FIRM:
+${persona.lastMeetingNotes || "[Invent realistic recent-meeting context: when the last meeting was (e.g. 3-6 months ago), what was discussed then, what's happened since.]"}
+
+HOW THIS SHAPES YOUR BEHAVIOR:
+- Speak like someone catching up with a trusted advisor, not someone being courted as a new client
+- Reference past meetings and prior decisions naturally ("like we talked about last quarter…", "when we set up the 529…")
+- Don't ask basic intro-level questions about the firm — you already know
+- DO raise questions about your portfolio, life changes since last meeting, market reactions, planning concerns
+- Be ready to engage on specific positions, allocations, or actions — these are familiar territory
+- If frustrated (Hard difficulty), it's because of recent performance or service issues, NOT because you're skeptical of the firm broadly
+
+WHAT YOU ALREADY KNOW (your current snapshot):
+- Your portfolio: ${persona.currentStrategies || "[invent current allocation]"}
+- Drawing status: ${persona.pullTime || "[invent — drawing or still saving]"}
+- Your current concerns and questions are the ones in the "Last meeting notes" + anything that's come up since` : "";
+
+      return `You are role-playing as a ${isReview ? "current" : "prospective"} wealth management client meeting a financial advisor from Corbett Road Wealth Management. ${isReview ? "This is a check-in / review meeting with your existing advisor." : "You are evaluating whether to hire them."}
 
 YOUR CHARACTER DETAILS:
 - Name: ${persona.name || "[invent a realistic name]"}
 - Age: ${persona.age || "[invent — typically 45–70]"}
 - Retirement timeframe: ${persona.retirement || "[invent]"}
 - What you want in retirement: ${persona.retirementGoals || "[invent realistic lifestyle goals]"}
-- Current investment strategies: ${persona.currentStrategies || "[invent — e.g. 401k, some individual stocks, savings account]"}
+- ${isReview ? "Current portfolio breakdown" : "Current investment strategies"}: ${persona.currentStrategies || "[invent — e.g. 401k, some individual stocks, savings account]"}
 - Primary financial goal: ${persona.primaryGoal || "[invent]"}
 - Investing comfort level: ${persona.comfortLevel || "[invent — conservative, moderate, or aggressive]"}
-- Estimated time before pulling money from savings: ${persona.pullTime || "[invent]"}
+- ${isReview ? "Drawing status" : "Estimated time before pulling money from savings"}: ${persona.pullTime || "[invent]"}
 - Current monthly savings: ${persona.monthlySavings || "[invent realistic figure]"}
 - Current household income: ${persona.income || "[invent realistic figure]"}
 - Current investable assets: ${persona.assets || "[invent realistic figure]"}
@@ -439,11 +462,12 @@ YOUR CHARACTER DETAILS:
 ADDITIONAL CONTEXT FROM USER (if any): ${persona.notes || "(none)"}
 
 ${difficultyBlock}
+${reviewBlock}
 ${curriculumBlock}
 
 CRITICAL RULES — READ CAREFULLY:
-1. Stay in character as this prospect at all times. Never break character. Never mention you are an AI.
-2. Do NOT coach the advisor. Do NOT provide feedback. You are the prospect, not a coach.
+1. Stay in character as this ${isReview ? "existing client" : "prospect"} at all times. Never break character. Never mention you are an AI.
+2. Do NOT coach the advisor. Do NOT provide feedback. You are the ${isReview ? "client" : "prospect"}, not a coach.
 3. Fill in gaps in your background by inventing realistic, consistent details as needed. Remember what you've said and stay consistent.
 4. Speak naturally. Keep responses concise — usually 1–3 sentences. This is a real conversation.
 5. Use natural speech patterns — fillers, hesitations, "yeah", "well", "honestly" — like a real person speaking out loud. Avoid lists and bullet points.
@@ -452,7 +476,7 @@ CRITICAL RULES — READ CAREFULLY:
 8. Never use markdown formatting. Just speak.
 9. NEVER narrate physical actions, expressions, gestures, or pauses. Do NOT write things like *smiles*, *nods*, *leans forward*, *laughs*, [pauses thoughtfully], (sighs), or any similar stage directions. You are speaking aloud only — output ONLY the words you would actually say. If you would smile or pause in real life, just keep speaking — the system speaks your output through text-to-speech and stage directions sound absurd when read aloud.
 
-${persona.focusStep ? "Open the conversation now per the curriculum primer above." : "Begin the conversation as the prospect. Wait for the advisor to start, then respond naturally."}`;
+${persona.focusStep ? "Open the conversation now per the curriculum primer above." : (isReview ? "Begin the conversation. Wait for the advisor to greet you, then respond naturally as someone catching up with a trusted advisor." : "Begin the conversation as the prospect. Wait for the advisor to start, then respond naturally.")}`;
     };
 
     // Trim a transcript to the most recent N turns while preserving the first 2 (anchor).
@@ -534,6 +558,8 @@ Provide a brief, specific, conversational suggestion of what the advisor should 
     const buildGraderSystemPrompt = (persona, transcript) => {
       const difficulty = persona.difficulty || "Medium";
       const focusStep = persona.focusStep;
+      const isReview = persona.meetingType === "review";
+
       const focusBlock = focusStep && CURRICULUM_STEPS[focusStep] ? `
 
 CURRICULUM MODE — FOCUSED PRACTICE:
@@ -542,14 +568,41 @@ ${CURRICULUM_STEPS[focusStep].focus}
 The conversation was intentionally short and limited to this step.
 For categories OTHER than the focused step, set "score" to null (not 0, not a guess) — those steps were NOT in scope and should be excluded from the report card. Only score the FOCUSED step rigorously and provide detailed evidence.` : "";
 
-      return `You are a senior sales coach reviewing a financial advisor's pitch to a prospective wealth management client. Score the pitch and provide evidence-based feedback.
+      const reviewDifficultyNote = isReview
+        ? (difficulty === "Easy" ? "(The client was set to easy review mode — they were cooperative, appreciative of the relationship, light check-in. Don't reward the advisor for getting cooperation that was given freely.)"
+        : difficulty === "Hard" ? "(The client was set to hard review mode — frustrated by performance, asking pointed questions about positions and fees, considering switching firms. Reward the advisor for handling this well.)" : "")
+        : (difficulty === "Easy" ? "(The prospect was set to easy mode — they were cooperative and helpful. Adjust your scoring accordingly: don't reward the advisor for getting cooperation that was given freely.)"
+        : difficulty === "Hard" ? "(The prospect was set to hard mode — they pushed back, asked challenging questions about fees, and were skeptical. Reward the advisor for handling difficulty well.)" : "");
 
-PROSPECT PROFILE:
+      // The 7 rubric categories — labels adapt to meeting type but keys stay identical so
+      // all downstream scoring/highlights/leaderboard logic works without modification.
+      const categoryDescriptions = isReview ? `
+1. Meeting Opening & Recap (rubric key: meeting_introduction) — Did the advisor open warmly, acknowledge the ongoing relationship, and recap the agenda for this review meeting? In a review the advisor should NOT re-introduce themselves or pitch the firm — they should orient the meeting briefly.
+2. Status & Life Check-In (rubric key: profiling) — Did the advisor ask thoughtful questions about what's changed since the last meeting — life events, family changes, work, plans? Did they refresh their picture of where the client is now?
+3. Surfacing Current Concerns (rubric key: uncovering_problems) — Did the advisor draw out the client's current worries, questions, or concerns (about the portfolio, markets, life timing, planning gaps, etc.)?
+4. Discussing Implications (rubric key: reviewing_implications) — Did the advisor explore what the surfaced concerns mean for the plan — risks, tradeoffs, what's at stake if not addressed?
+5. Recommendations & Adjustments (rubric key: providing_solutions) — Did the advisor speak to what's working and recommend any specific adjustments? Did they tie recommendations to the client's stated concerns?
+6. Action Items & Next Steps (rubric key: call_to_action) — Did the advisor confirm concrete action items, decisions to make, or commitments before next meeting?
+7. Meeting Wrap-Up (rubric key: wrap_up) — Did the advisor close professionally, summarize what was covered and what's next, and schedule or confirm the next check-in?`
+      : `
+1. Meeting Introduction (rubric key: meeting_introduction) — Did the advisor open warmly, set the agenda, and establish credibility?
+2. Profiling the Prospect (rubric key: profiling) — Did the advisor ask thoughtful situation questions to understand the prospect's life, goals, family, work?
+3. Uncovering and Identifying Key Problems/Concerns (rubric key: uncovering_problems) — Did the advisor surface the prospect's real worries, gaps, or motivations?
+4. Reviewing the Implications of the Problems/Concerns (rubric key: reviewing_implications) — Did the advisor explore what those problems would mean if unaddressed (financial, emotional, family impact)?
+5. Providing a Clear Solution(s) or Offer(s) (rubric key: providing_solutions) — Did the advisor connect Corbett Road's services to the prospect's specific stated concerns?
+6. Giving the Prospect a Call To Action and Actionable Next Steps (rubric key: call_to_action) — Did the advisor ask for a concrete commitment or next step?
+7. Meeting Wrap-Up (rubric key: wrap_up) — Did the advisor close professionally, summarize, and leave the door open?`;
+
+      return `You are a senior sales coach reviewing a financial advisor's ${isReview ? "review meeting with an existing client" : "pitch to a prospective wealth management client"}. Score the ${isReview ? "meeting" : "pitch"} and provide evidence-based feedback.
+
+${isReview ? "CLIENT PROFILE" : "PROSPECT PROFILE"}:
 ${JSON.stringify(persona, null, 2)}
 
 DIFFICULTY LEVEL: ${difficulty}
-${difficulty === "Easy" ? "(The prospect was set to easy mode — they were cooperative and helpful. Adjust your scoring accordingly: don't reward the advisor for getting cooperation that was given freely.)" : ""}
-${difficulty === "Hard" ? "(The prospect was set to hard mode — they pushed back, asked challenging questions about fees, and were skeptical. Reward the advisor for handling difficulty well.)" : ""}
+${reviewDifficultyNote}
+${isReview ? `
+THIS IS A REVIEW MEETING — IMPORTANT FRAMING:
+The advisor is NOT pitching this client from scratch. The client is an existing relationship. Do NOT penalize the advisor for skipping firm introductions or initial credibility-building — those don't apply here. DO judge each rubric category on how well it applies to a review-meeting context, using the descriptions below.` : ""}
 ${focusBlock}
 
 FULL TRANSCRIPT:
@@ -583,14 +636,7 @@ CRITICAL RULES:
 
 Score the advisor 1–10 in each of these 7 categories. For each score, cite a SPECIFIC moment from the transcript as evidence (quote a phrase or describe what was said/missed).
 
-Categories:
-1. Meeting Introduction — Did the advisor open warmly, set the agenda, and establish credibility?
-2. Profiling the Prospect — Did the advisor ask thoughtful situation questions to understand the prospect's life, goals, family, work?
-3. Uncovering and Identifying Key Problems/Concerns — Did the advisor surface the prospect's real worries, gaps, or motivations?
-4. Reviewing the Implications of the Problems/Concerns — Did the advisor explore what those problems would mean if unaddressed (financial, emotional, family impact)?
-5. Providing a Clear Solution(s) or Offer(s) — Did the advisor connect Corbett Road's services to the prospect's specific stated concerns?
-6. Giving the Prospect a Call To Action and Actionable Next Steps — Did the advisor ask for a concrete commitment or next step?
-7. Meeting Wrap-Up — Did the advisor close professionally, summarize, and leave the door open?
+Categories:${categoryDescriptions}
 
 Also provide qualitative feedback on:
 - Cadence
@@ -698,7 +744,7 @@ Return ONLY valid JSON in this exact shape (no markdown, no commentary outside J
     // this user's recent history. If provided, the model is instructed to generate something
     // substantively different. Acts as a hard exclusion against back-to-back near-duplicates
     // like "Leila Nasiri" then "Leila Nasrallah".
-    const buildPersonaGenPrompt = (recentPersonas = []) => {
+    const buildPersonaGenPrompt = (recentPersonas = [], meetingType = "pitch") => {
       // Build the recent-history block only if we have any to exclude
       let recentBlock = "";
       if (recentPersonas && recentPersonas.length > 0) {
@@ -723,7 +769,12 @@ Your new persona MUST also differ in:
   - Primary financial concern`;
       }
 
-      return `Generate ONE prospective wealth management client for a Corbett Road Wealth Management training simulation. The firm serves clients in the mid-Atlantic United States (DC, Maryland, Virginia area) with $200K to $5M in investable assets.
+      const isReview = meetingType === "review";
+      const opener = isReview
+        ? `Generate ONE EXISTING wealth management client for a Corbett Road Wealth Management training simulation. This is for a REVIEW MEETING — a check-in with someone the firm has been working with for a while. The advisor knows this client; they have history together. The firm serves clients in the mid-Atlantic United States (DC, Maryland, Virginia area) with $200K to $5M in investable assets.`
+        : `Generate ONE prospective wealth management client for a Corbett Road Wealth Management training simulation. The firm serves clients in the mid-Atlantic United States (DC, Maryland, Virginia area) with $200K to $5M in investable assets.`;
+
+      return `${opener}
 
 YOUR CHARACTER MUST BE A REALISTIC, COHERENT PERSON. All details should fit together naturally — their assets should match their career stage, their concerns should match their life situation, their name should match their background, their financial situation should match their profession.${recentBlock}
 
@@ -797,10 +848,27 @@ Age range: 35–75. Vary widely. Don't always pick 55–62.
 
 ASSETS RANGE: $200K to $5M investable. Be specific and varied — not always round numbers like $1M. Try $347K, $812K, $1.4M, $2.3M, $4.6M, $625K, $1.85M, etc.
 
-INCOME RANGE: $80K to $800K (or "retired, drawing $X from portfolio + Social Security"). Match to profession realistically.
+INCOME RANGE: $80K to $800K (or "retired, drawing $X from portfolio + Social Security"). Match to profession realistically.${isReview ? `
+
+REVIEW MEETING — ADDITIONAL CONTEXT NEEDED:
+This is an EXISTING client, so the persona must include their current portfolio shape and a snapshot of where they are right now (not just goals — actual current state). Include realistic equity/fixed-income/cash splits, current draws if retired, and what was discussed at the last meeting so the advisor has context going in. The client has history with the firm — they're not being onboarded, they're checking in.` : ""}
 
 Return ONLY valid JSON in this exact shape (no commentary, no markdown):
-{
+${isReview ? `{
+  "name": "First Last (authentic to their background)",
+  "age": "number as string",
+  "retirement": "e.g. 'already retired 2 years' or 'retiring in about 4 years'",
+  "retirementGoals": "what they want to do — 1 specific sentence with real lifestyle details",
+  "currentStrategies": "current portfolio breakdown — equity/fixed-income/cash mix, e.g. '60% equities (mostly large-cap US + international), 30% fixed income, 10% cash' — 1-2 sentences",
+  "primaryGoal": "their main current financial priority — 1 specific sentence",
+  "comfortLevel": "Conservative | Moderate | Aggressive — with a phrase of color showing why",
+  "pullTime": "drawing status — e.g. 'currently drawing $4,500/mo from portfolio + Social Security' OR 'still saving, drawing nothing yet'",
+  "monthlySavings": "$X,XXX (or '$0 — drawing from portfolio' if retired)",
+  "income": "$XXX,XXX (working income, or 'retired, drawing $X from portfolio + $X Social Security')",
+  "assets": "$X,XXX,XXX (total investable assets currently)",
+  "notes": "2-3 sentences of life context — name their family members specifically (spouse name, kids' names if relevant), name their occupation specifically (or 'retired from X'), establish that they're an existing Corbett Road client",
+  "lastMeetingNotes": "3-4 sentences: when was the last meeting (e.g. '4 months ago'), what specific topics were discussed (e.g. 'rebalanced toward more conservative allocation after Q1 volatility, set up 529 for granddaughter'), and any concerns or questions left open or that have come up since then (e.g. 'still uncertain about timing of Social Security claim — wanted to revisit this meeting')"
+}` : `{
   "name": "First Last (authentic to their background)",
   "age": "number as string",
   "retirement": "e.g. 'about 8 years', 'already retired 2 years', 'never plans to fully retire'",
@@ -813,7 +881,7 @@ Return ONLY valid JSON in this exact shape (no commentary, no markdown):
   "income": "$XXX,XXX",
   "assets": "$X,XXX,XXX",
   "notes": "2-3 sentences of life context — name their family members specifically (spouse name, kids' names if relevant), name their occupation specifically, mention a recent event or current concern, give the advisor a real human to relate to"
-}`;
+}`}`;
     };
 
 
@@ -1407,6 +1475,12 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
               className={`uppercase tracking-[0.18em] text-xs ${currentView === "team" ? "text-[var(--ink)]" : "text-[var(--ink)]/60 hover:text-[var(--ink)]"}`}
             >
               My Team
+            </button>
+            <button
+              onClick={() => onNavigate("highlights")}
+              className={`uppercase tracking-[0.18em] text-xs ${currentView === "highlights" ? "text-[var(--ink)]" : "text-[var(--ink)]/60 hover:text-[var(--ink)]"}`}
+            >
+              Highlights
             </button>
             {managerUnlocked && (
               <button
@@ -2408,12 +2482,14 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
               <span className="text-xs uppercase tracking-[0.18em] text-[var(--ink)]/50">Mode</span>
               <div className="mode-toggle">
                 <button onClick={() => setMode("pitch")} className={mode === "pitch" ? "active" : ""}>Pitch</button>
+                <button onClick={() => setMode("review")} className={mode === "review" ? "active" : ""}>Review</button>
                 <button onClick={() => setMode("practice")} className={mode === "practice" ? "active" : ""}>Practice</button>
                 <button onClick={() => setMode("curriculum")} className={mode === "curriculum" ? "active" : ""}>Curriculum</button>
                 <button onClick={() => setMode("spin")} className={mode === "spin" ? "active" : ""}>Objections</button>
               </div>
               <span className="text-xs text-[var(--ink)]/50 italic">
                 {mode === "pitch" && "A live, unassisted peer pitch with the AI prospect."}
+                {mode === "review" && "A check-in meeting with an existing client. Review portfolio, address concerns, plan ahead."}
                 {mode === "practice" && "Same prospect — with a coach offering 'best answer' suggestions in real time."}
                 {mode === "curriculum" && "Drill a single step of the seven-step process at a time."}
                 {mode === "spin" && "Rapid-fire objection drill. No client context — just the hard questions."}
@@ -2428,18 +2504,21 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
               <div className="relative z-10">
                 <div className="text-[10px] uppercase tracking-[0.3em] text-white/70 mb-4">
                   {mode === "pitch" && "Pitch mode"}
+                  {mode === "review" && "Review mode"}
                   {mode === "practice" && "Practice mode"}
                   {mode === "curriculum" && "Curriculum mode"}
                   {mode === "spin" && "Objections mode"}
                 </div>
                 <h2 className="font-display text-4xl mb-3 leading-tight text-white">
                   {mode === "pitch" && "Begin a peer pitch session."}
+                  {mode === "review" && "Run a client review meeting."}
                   {mode === "practice" && "Begin a guided practice session."}
                   {mode === "curriculum" && "Drill a single step of the pitch."}
                   {mode === "spin" && "Spin the hard objections."}
                 </h2>
                 <p className="text-white/75 text-sm mb-8 max-w-md">
                   {mode === "pitch" && "You'll meet a prospective client and run through your pitch live. No hints, no interruptions — just you, the prospect, and the seven-step framework."}
+                  {mode === "review" && "You'll meet with an existing client for a check-in conversation. Review their portfolio and current situation, address concerns since the last meeting, and plan next steps. Scored using the same seven-step framework, adapted for review-meeting context."}
                   {mode === "practice" && "Same as a peer pitch, but a senior coach watches over your shoulder. After each prospect turn, you'll see what an expert advisor might say next — use it or ignore it."}
                   {mode === "curriculum" && "Pick one of the seven steps and run a focused, short session that drops you exactly at that point in the conversation. Best way to drill weak areas."}
                   {mode === "spin" && "Rapid-fire reps on the hardest objections in the book — fees, returns, fiduciary, switching firms, market crashes. No persona, no setup. Just the question, your response, and a score. Repeat as many times as you want."}
@@ -2452,6 +2531,7 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
                   <button onClick={onStartSession} className="px-8 py-3 rounded text-xs uppercase tracking-[0.2em] bg-white text-[var(--teal)] hover:bg-white/90 transition-all font-medium" style={{ boxShadow: "0 4px 12px rgba(0,0,0,0.15)" }}>
                     {mode === "curriculum" && "Pick A Step →"}
                     {mode === "spin" && "Start Drilling →"}
+                    {mode === "review" && "Set Up Client →"}
                     {(mode === "pitch" || mode === "practice") && "Set Up Prospect →"}
                   </button>
                 )}
@@ -2534,7 +2614,9 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
                 <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/50 mb-1 flex items-center gap-1.5 flex-wrap">
                   <span>{date}</span>
                   <span className="text-[var(--ink)]/30">·</span>
-                  <span>{report.mode}</span>
+                  <span style={report.mode === "review" ? { color: "var(--gold)", fontWeight: 600 } : undefined}>
+                    {report.mode === "review" ? "Review" : report.mode}
+                  </span>
                   {!isDrill && (
                     <>
                       <span className="text-[var(--ink)]/30">·</span>
@@ -2583,8 +2665,10 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
       name: "", age: "", retirement: "", retirementGoals: "",
       currentStrategies: "", primaryGoal: "", comfortLevel: "",
       pullTime: "", monthlySavings: "", income: "", assets: "", notes: "",
+      lastMeetingNotes: "",
       difficulty: "Medium",
       focusStep: null,
+      meetingType: "pitch", // "pitch" (new prospect) or "review" (existing client check-in)
     };
 
     function PersonaSetupView({ apiKey, mode, onLaunch, onCancel }) {
@@ -2608,7 +2692,7 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
           const reply = await callGroq({
             apiKey,
             model: MODEL_GRADER,
-            messages: [{ role: "user", content: buildPersonaGenPrompt(recentPersonas) }],
+            messages: [{ role: "user", content: buildPersonaGenPrompt(recentPersonas, mode) }],
             temperature: 1.0,
             jsonMode: true,
           });
@@ -2618,16 +2702,19 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
           // Save to recent-history so the NEXT generation can avoid it
           pushRecentPersona(parsed);
         } catch (e) {
-          setError("Couldn't generate a prospect. " + e.message);
+          setError("Couldn't generate. " + e.message);
         } finally {
           setGenerating(false);
         }
       };
 
       const launch = () => {
+        // Stamp the meetingType onto the persona so downstream code
+        // (grader, prospect AI, display) knows what kind of meeting this is.
+        const baseMeetingType = (mode === "review") ? "review" : "pitch";
         const finalPersona = mode === "curriculum"
-          ? { ...persona, focusStep: curriculumStep }
-          : persona;
+          ? { ...persona, focusStep: curriculumStep, meetingType: baseMeetingType }
+          : { ...persona, meetingType: baseMeetingType };
         onLaunch(finalPersona);
       };
 
@@ -2687,9 +2774,13 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
               <> · Practicing <span className="text-[var(--gold)]">{CURRICULUM_STEPS[curriculumStep].label}</span></>
             )}
           </div>
-          <h1 className="font-display text-4xl mb-3">Set up your prospect.</h1>
+          <h1 className="font-display text-4xl mb-3">
+            {mode === "review" ? "Set up your client." : "Set up your prospect."}
+          </h1>
           <p className="text-sm text-[var(--ink)]/60 max-w-2xl mb-3">
-            Fill in as much or as little as you'd like — the AI will invent realistic details for any gaps. Or click "Generate prospect" for a random scenario.
+            {mode === "review"
+              ? `Fill in as much or as little as you'd like — the AI will invent realistic details for any gaps. Or click "Generate client" for a random existing-client scenario.`
+              : `Fill in as much or as little as you'd like — the AI will invent realistic details for any gaps. Or click "Generate prospect" for a random scenario.`}
           </p>
           <p className="text-xs text-[var(--accent)] max-w-2xl mb-8 leading-relaxed">
             ⚠ Use fictional details only. Never enter a real client's name or financial information.
@@ -2699,11 +2790,15 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
           <div className="card p-6 mb-6">
             <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--ink)]/60 mb-3">Difficulty</div>
             <div className="grid grid-cols-3 gap-3">
-              {[
+              {(mode === "review" ? [
+                { value: "Easy", label: "Easy", desc: "Cooperative & happy — appreciative of the relationship, light check-in" },
+                { value: "Medium", label: "Medium", desc: "Engaged but with questions — concerns about positions or life changes" },
+                { value: "Hard", label: "Hard", desc: "Frustrated — pointed questions about performance, considering switching firms" },
+              ] : [
                 { value: "Easy", label: "Easy", desc: "Cooperative & helpful — volunteers info and gently guides the advisor along" },
                 { value: "Medium", label: "Medium", desc: "Realistic — open but appropriately skeptical, raises a few real concerns" },
                 { value: "Hard", label: "Hard", desc: "Demanding — grills you on process, fees, returns, fiduciary status, conflicts, and more" },
-              ].map(opt => (
+              ]).map(opt => (
                 <button
                   key={opt.value}
                   onClick={() => set("difficulty", opt.value)}
@@ -2726,7 +2821,7 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
 
           <div className="flex flex-wrap gap-3 mb-8">
             <button onClick={generate} disabled={generating} className="btn-primary px-5 py-2.5 rounded text-xs uppercase tracking-[0.18em]">
-              {generating ? "Generating…" : "✨ Generate Prospect"}
+              {generating ? "Generating…" : (mode === "review" ? "✨ Generate Client" : "✨ Generate Prospect")}
             </button>
             <button onClick={() => setPersona({ ...EMPTY_PERSONA, difficulty: persona.difficulty })} className="btn-ghost px-5 py-2.5 rounded text-xs uppercase tracking-[0.18em]">Clear all</button>
           </div>
@@ -2758,6 +2853,23 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
                   )}
                 </div>
               ))}
+              {/* Review-mode only: last meeting notes */}
+              {mode === "review" && (
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] uppercase tracking-[0.18em] text-[var(--ink)]/60 mb-2">
+                    Last meeting notes <span className="text-[var(--gold)]">(Review only)</span>
+                  </label>
+                  <textarea
+                    value={persona.lastMeetingNotes || ""}
+                    onChange={e => set("lastMeetingNotes", e.target.value)}
+                    placeholder="e.g. Last met 4 months ago. Rebalanced toward more conservative allocation after Q1 volatility. Set up 529 for granddaughter Emma. Open question: timing of Social Security claim — wants to revisit this meeting."
+                    rows={5}
+                    className="input-field w-full px-3 py-2.5 rounded text-sm"
+                    style={{ resize: "vertical", minHeight: "100px" }}
+                  />
+                  <p className="text-[10px] text-[var(--ink)]/40 mt-1">Brief recap of when the last meeting was, what was discussed, and any open concerns or questions since.</p>
+                </div>
+              )}
               <div className="md:col-span-2">
                 <label className="block text-[11px] uppercase tracking-[0.18em] text-[var(--ink)]/60 mb-2">Additional context (optional)</label>
                 <textarea
@@ -3548,6 +3660,145 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
       delivery: "Delivery",
     };
 
+    // ======================================================================
+    // HIGHLIGHTS REEL — top-scoring section examples across the team
+    // ======================================================================
+
+    // Score threshold for a section to be considered "highlight-worthy"
+    const HIGHLIGHT_MIN_SCORE = 8;
+    // Max highlights to show per section
+    const HIGHLIGHT_LIMIT_PER_SECTION = 3;
+
+    // For a given section key, return the top N reports (across all advisors)
+    // where this section scored at the minimum threshold or higher.
+    // Returns: array of { report, score } objects sorted by score descending.
+    // Only includes pitch sessions (mode === "pitch") to match the leaderboard's standards.
+    function getTopSectionHighlights(allReports, sectionKey, minScore = HIGHLIGHT_MIN_SCORE, limit = HIGHLIGHT_LIMIT_PER_SECTION) {
+      if (!Array.isArray(allReports) || !sectionKey) return [];
+      const eligible = [];
+      for (const r of allReports) {
+        if (!isPitchReport(r)) continue;
+        const score = r?.card?.scores?.[sectionKey]?.score;
+        if (typeof score !== "number" || score < minScore) continue;
+        eligible.push({ report: r, score });
+      }
+      // Sort by score descending. Tie-break by date (newer first) so recency wins.
+      eligible.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return (b.report.createdAt || 0) - (a.report.createdAt || 0);
+      });
+      return eligible.slice(0, limit);
+    }
+
+    // Returns true if THIS report's score for THIS section is currently in the
+    // top N team-wide. Used to render the "Featured in highlights" badge on the
+    // advisor's own report card.
+    function isReportFeaturedForSection(report, allReports, sectionKey) {
+      const top = getTopSectionHighlights(allReports, sectionKey);
+      return top.some(h => h.report.id === report.id);
+    }
+
+    // Extract a relevant transcript excerpt for a given rubric section.
+    // The "evidence quote" stored on the report card is short (one sentence).
+    // We use it as an anchor and grab surrounding turns for context.
+    //
+    // Rules:
+    //   - Meeting Introduction (step 1): first 4 turns of transcript
+    //   - Wrap-Up (step 7): last 4 turns of transcript
+    //   - Mid-pitch steps: find the turn containing the evidence quote, take
+    //     2 turns before + 2 turns after as context
+    //   - If no evidence quote / no match: return middle portion of transcript
+    function extractSectionExcerpt(report, sectionKey) {
+      const transcript = Array.isArray(report?.transcript) ? report.transcript : [];
+      if (transcript.length === 0) return [];
+
+      // Step 1 — Meeting Introduction: opening
+      if (sectionKey === "meeting_introduction") {
+        return transcript.slice(0, 4);
+      }
+
+      // Step 7 — Wrap-Up: closing
+      if (sectionKey === "wrap_up") {
+        return transcript.slice(-4);
+      }
+
+      // Mid-pitch — locate via evidence quote
+      const evidence = report?.card?.scores?.[sectionKey]?.evidence || "";
+      const evidenceLower = evidence.trim().toLowerCase();
+      if (evidenceLower.length > 0) {
+        // Look for a turn whose text contains a substring of the evidence.
+        // Evidence often quotes from a turn, so partial-match is reliable.
+        // Use the first ~30 characters of the evidence for matching to avoid
+        // false negatives from punctuation/whitespace differences.
+        const needle = evidenceLower.slice(0, Math.min(30, evidenceLower.length));
+        let foundIdx = -1;
+        for (let i = 0; i < transcript.length; i++) {
+          const text = (transcript[i].text || "").toLowerCase();
+          if (text.includes(needle)) {
+            foundIdx = i;
+            break;
+          }
+        }
+        if (foundIdx >= 0) {
+          const start = Math.max(0, foundIdx - 2);
+          const end = Math.min(transcript.length, foundIdx + 3);
+          return transcript.slice(start, end);
+        }
+      }
+
+      // Fallback: return middle portion (4 turns from middle)
+      const mid = Math.floor(transcript.length / 2);
+      const start = Math.max(0, mid - 2);
+      const end = Math.min(transcript.length, mid + 2);
+      return transcript.slice(start, end);
+    }
+
+    // Anonymize a transcript so the advisor's identity is hidden.
+    // Replaces:
+    //   - "I'm <FirstName>" and "I am <FirstName>" → "I'm [Advisor]"
+    //   - "my name is <FirstName>" → "my name is [Advisor]"
+    //   - Direct mentions of the advisor's first OR last name → "[Advisor]"
+    // Returns a new array — original is untouched.
+    //
+    // This is best-effort, not perfect. A prospect saying "thanks, Marcus" mid-turn
+    // gets caught. A prospect saying "you remind me of my friend Marcus" also gets
+    // caught (false positive, acceptable). An advisor saying "my colleague Marcus"
+    // (referring to someone else) would also get anonymized — also acceptable since
+    // we're erring on the side of more anonymization, not less.
+    function anonymizeTranscript(transcript, advisorName) {
+      if (!Array.isArray(transcript)) return [];
+      if (!advisorName) return transcript;
+      const nameParts = String(advisorName).trim().split(/\s+/).filter(p => p.length > 1);
+      if (nameParts.length === 0) return transcript;
+
+      return transcript.map(turn => {
+        let text = turn.text || "";
+        // First, handle the "I'm <Name>" / "I am <Name>" / "my name is <Name>" patterns
+        // (these can include the FULL name, so we strip the whole introductory phrase)
+        text = text.replace(/\b(I'?m|I am|my name is|this is)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?=[\s,.!?]|$)/g, (match, leader) => {
+          // Only replace if the captured name parts include the advisor's name parts
+          const lowerMatch = match.toLowerCase();
+          const containsName = nameParts.some(np => lowerMatch.includes(np.toLowerCase()));
+          if (containsName) {
+            return `${leader} [Advisor]`;
+          }
+          return match;
+        });
+        // Then replace any remaining standalone mentions of name parts with [Advisor].
+        // Skip parts that are already adjacent to a "[Advisor]" placeholder (avoids
+        // turning "I'm [Advisor] Carvalho" into "I'm [Advisor] [Advisor]").
+        for (const part of nameParts) {
+          const escaped = part.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+          // Negative lookbehind for "[Advisor] " before the name (so we skip cases like "[Advisor] Smith")
+          const re = new RegExp(`(?<!\\[Advisor\\]\\s)\\b${escaped}\\b`, "gi");
+          text = text.replace(re, "[Advisor]");
+        }
+        // Cleanup pass: any "[Advisor] [Advisor]" (two adjacent) collapses to one
+        text = text.replace(/\[Advisor\]\s+\[Advisor\]/g, "[Advisor]");
+        return { ...turn, text };
+      });
+    }
+
     function ScoreBar({ score }) {
       const pct = (score / 10) * 100;
       const color = score >= 8 ? "var(--gold)" : score >= 6 ? "var(--ink)" : "var(--accent)";
@@ -3788,7 +4039,7 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
       );
     }
 
-    function ReportCardView({ report, onBack, user, allReports, apiKey, onDelete }) {
+    function ReportCardView({ report, onBack, user, allReports, teamReports, apiKey, onDelete }) {
       const card = report.card;
       const persona = report.persona;
       const [discussOpen, setDiscussOpen] = useState(false);
@@ -3938,7 +4189,11 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
           <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-4">
             <div>
               <div className="text-xs uppercase tracking-[0.25em] text-[var(--ink)]/50 mb-2 flex items-center gap-2 flex-wrap">
-                <span>Report Card · {report.mode}</span>
+                <span>Report Card</span>
+                <span className="text-[var(--ink)]/30">·</span>
+                <span style={{ color: report.mode === "review" ? "var(--gold)" : undefined, fontWeight: report.mode === "review" ? 600 : 400 }}>
+                  {report.mode === "review" ? "Review Meeting" : report.mode}
+                </span>
                 {persona?.difficulty && (
                   <>
                     <span className="text-[var(--ink)]/30">·</span>
@@ -3951,7 +4206,9 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
                   </>
                 )}
               </div>
-              <h1 className="font-display text-5xl mb-2 leading-tight">{persona?.name || "Prospect Pitch"}</h1>
+              <h1 className="font-display text-5xl mb-2 leading-tight">
+                {persona?.name || (report.mode === "review" ? "Client Review" : "Prospect Pitch")}
+              </h1>
               <div className="text-sm text-[var(--ink)]/60">{date}</div>
             </div>
             <div className="flex items-end gap-8">
@@ -4022,13 +4279,24 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
                 if (!item) return null;
                 // In curriculum mode, non-focus categories have score === null and are intentionally excluded
                 if (item.score === null || item.score === undefined) return null;
+                // Check if this section is currently in the team's top 3 highlights
+                const isFeatured = teamReports ? isReportFeaturedForSection(report, teamReports, key) : false;
                 return (
-                  <div key={key} className="card p-6">
-                    <div className="flex items-start justify-between mb-3 gap-4">
+                  <div key={key} className="card p-6" style={isFeatured ? { borderLeft: "3px solid var(--gold)" } : undefined}>
+                    <div className="flex items-start justify-between mb-3 gap-4 flex-wrap">
                       <div>
                         <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/40 mb-1">Step {i + 1}</div>
                         <div className="font-display text-xl">{label}</div>
                       </div>
+                      {isFeatured && (
+                        <div
+                          className="text-[10px] uppercase tracking-[0.18em] px-2.5 py-1 rounded-full shrink-0"
+                          style={{ background: "var(--gold)", color: "white" }}
+                          title="This section is in the team's top 3 highlights for this step"
+                        >
+                          ⭐ Featured in team highlights
+                        </div>
+                      )}
                     </div>
                     <ScoreBar score={item.score} />
                     {item.evidence && (
@@ -5165,9 +5433,14 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
     // True if this is a real Pitch session (mode === "pitch").
     // Used by Team views (leaderboard, team breakdown, per-advisor stats) — these ALWAYS exclude
     // practice, curriculum, and Objections drills regardless of any toggle.
+    // True if this is a real Pitch or Review session.
+    // Used by Team views (leaderboard, team breakdown, per-advisor stats) — these ALWAYS exclude
+    // practice, curriculum, and Objections drills regardless of any toggle.
+    // Review meetings count the same as pitches: real client conversations graded on the
+    // 7-step rubric, same difficulty multiplier, same leaderboard eligibility.
     function isPitchReport(report) {
       if (!report || !report.card) return false;
-      if (report.mode !== "pitch") return false;
+      if (report.mode !== "pitch" && report.mode !== "review") return false;
       if (report.card.isObjectionsDrill) return false;
       return true;
     }
@@ -5219,7 +5492,8 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
     function shouldCountForPersonalStats(report, includePracticeAndCurriculum) {
       if (!report || !report.card) return false;
       if (report.mode === "spin" || report.card.isObjectionsDrill) return false;
-      if (report.mode === "pitch") return true;
+      // Pitch and Review both count as real graded sessions
+      if (report.mode === "pitch" || report.mode === "review") return true;
       if (includePracticeAndCurriculum && (report.mode === "practice" || report.mode === "curriculum")) return true;
       return false;
     }
@@ -6094,6 +6368,298 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
             </div>
             <div className="text-[10px] text-[var(--ink)]/40 mt-5 pt-4 border-t" style={{ borderColor: "var(--rule)" }}>
               Manager access lasts until you sign out or close this tab. Press <kbd className="px-1.5 py-0.5 rounded bg-[var(--parchment-dim)] font-mono text-[10px]">Esc</kbd> to cancel.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ======================================================================
+    // HIGHLIGHTS VIEW — best section examples across the team (anonymized)
+    // ======================================================================
+
+    function HighlightsView({ currentUser, profiles, allReports, managerUnlocked, onViewReport }) {
+      // Selected highlight to expand in modal (null = no modal open)
+      const [selected, setSelected] = useState(null);
+      // Which section to default-expand (null = all collapsed at start)
+      const [openSection, setOpenSection] = useState(null);
+
+      // Build a profile-id → name lookup for the manager-mode attribution
+      const nameForUserId = useMemo(() => {
+        const map = new Map();
+        for (const p of profiles) {
+          map.set(p.id, p.name || nameFromEmailLocal(p.email));
+        }
+        return map;
+      }, [profiles]);
+
+      // For each section, compute the top 3 highlights once
+      const highlightsBySection = useMemo(() => {
+        const map = {};
+        for (const key of Object.keys(RUBRIC_LABELS)) {
+          map[key] = getTopSectionHighlights(allReports, key);
+        }
+        return map;
+      }, [allReports]);
+
+      // Open the modal for a specific highlight
+      const openHighlight = (highlight, sectionKey) => {
+        const advisorName = nameForUserId.get(highlight.report.userId) || "Unknown";
+        setSelected({
+          highlight,
+          sectionKey,
+          advisorName, // Used for both anonymization AND manager-mode display
+        });
+      };
+
+      const sectionKeys = Object.keys(RUBRIC_LABELS);
+
+      // Total counts for summary stats at top
+      const totalHighlights = Object.values(highlightsBySection).reduce((sum, arr) => sum + arr.length, 0);
+      const sectionsWithHighlights = Object.values(highlightsBySection).filter(arr => arr.length > 0).length;
+
+      return (
+        <div className="max-w-6xl mx-auto px-8 py-12">
+          <div className="fade-up">
+            <div className="text-xs uppercase tracking-[0.25em] text-[var(--ink)]/50 mb-2">Team</div>
+            <h1 className="font-display text-5xl mb-3 leading-tight">Highlights Reel</h1>
+            <p className="text-sm text-[var(--ink)]/60 max-w-3xl mb-2">
+              Top-scoring section examples from across the team. Browse by step to see what great looks like in practice.
+            </p>
+            <p className="text-xs text-[var(--ink)]/50 max-w-3xl mb-10">
+              Score 8 or higher qualifies · Top 3 per section · Pitch sessions only · {managerUnlocked
+                ? <span style={{ color: "var(--gold)" }}>Manager mode — advisor names visible</span>
+                : <span>Advisor names are anonymized as <strong>[Advisor]</strong></span>}
+            </p>
+          </div>
+
+          {/* Summary banner */}
+          <div className="card p-5 mb-8 flex items-center gap-6 fade-up" style={{ borderLeft: "3px solid var(--gold)" }}>
+            <div>
+              <div className="font-display text-3xl" style={{ color: "var(--gold)" }}>{totalHighlights}</div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/60">Total highlights</div>
+            </div>
+            <div className="h-12 w-px" style={{ background: "var(--rule)" }}></div>
+            <div>
+              <div className="font-display text-3xl">{sectionsWithHighlights}<span className="text-[var(--ink)]/30">/{sectionKeys.length}</span></div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/60">Sections with highlights</div>
+            </div>
+          </div>
+
+          {/* Section cards */}
+          <div className="space-y-4">
+            {sectionKeys.map((sectionKey, idx) => {
+              const label = RUBRIC_LABELS[sectionKey];
+              const highlights = highlightsBySection[sectionKey] || [];
+              const isOpen = openSection === sectionKey;
+
+              return (
+                <div key={sectionKey} className="card fade-up">
+                  <button
+                    onClick={() => setOpenSection(isOpen ? null : sectionKey)}
+                    className="w-full p-5 flex items-center justify-between text-left hover:bg-black/[0.02] transition-colors rounded"
+                  >
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/40 w-12 shrink-0">Step {idx + 1}</div>
+                      <div className="font-display text-xl">{label}</div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="text-right">
+                        <div className="font-display text-2xl" style={{ color: highlights.length > 0 ? "var(--gold)" : "var(--ink)" }}>
+                          {highlights.length}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink)]/50">
+                          {highlights.length === 1 ? "highlight" : "highlights"}
+                        </div>
+                      </div>
+                      <div className="text-[var(--ink)]/40 text-lg transition-transform" style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▼</div>
+                    </div>
+                  </button>
+
+                  {isOpen && (
+                    <div className="px-5 pb-5 fade-up">
+                      {highlights.length === 0 ? (
+                        <div className="text-center py-8 text-sm text-[var(--ink)]/50 italic">
+                          No standout examples yet for this section. Run more pitches and score 8 or higher to qualify.
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {highlights.map((h, i) => {
+                            const advisorName = nameForUserId.get(h.report.userId) || "Unknown";
+                            const difficulty = h.report.persona?.difficulty || "Medium";
+                            const dateStr = new Date(h.report.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+
+                            return (
+                              <button
+                                key={h.report.id}
+                                onClick={() => openHighlight(h, sectionKey)}
+                                className="w-full p-4 rounded border text-left hover:border-[var(--gold)] transition-colors flex items-center justify-between gap-3"
+                                style={{ borderColor: "var(--rule)" }}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/60 mb-1 flex-wrap">
+                                    <span>Rank #{i + 1}</span>
+                                    <span className="text-[var(--ink)]/30">·</span>
+                                    <span>{dateStr}</span>
+                                    <span className="text-[var(--ink)]/30">·</span>
+                                    <span style={{
+                                      color: difficulty === "Hard" ? "var(--accent)" : difficulty === "Easy" ? "var(--gold-soft)" : "var(--ink)",
+                                      fontWeight: 600,
+                                    }}>{difficulty}</span>
+                                  </div>
+                                  <div className="text-sm">
+                                    {managerUnlocked ? (
+                                      <span><strong>{advisorName}</strong></span>
+                                    ) : (
+                                      <span className="text-[var(--ink)]/70 italic">[Advisor]</span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <div className="font-display text-3xl" style={{ color: "var(--gold)" }}>{h.score.toFixed(1)}</div>
+                                  <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink)]/50">section score</div>
+                                </div>
+                                <div className="text-[var(--ink)]/40 text-sm ml-2">→</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Excerpt modal */}
+          {selected && (
+            <HighlightExcerptModal
+              highlight={selected.highlight}
+              sectionKey={selected.sectionKey}
+              advisorName={selected.advisorName}
+              managerUnlocked={managerUnlocked}
+              onClose={() => setSelected(null)}
+              onViewFullReport={managerUnlocked && onViewReport ? () => {
+                onViewReport(selected.highlight.report.id);
+                setSelected(null);
+              } : null}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // ======================================================================
+    // HIGHLIGHT EXCERPT MODAL — shows transcript span for a single highlight
+    // ======================================================================
+
+    function HighlightExcerptModal({ highlight, sectionKey, advisorName, managerUnlocked, onClose, onViewFullReport }) {
+      const report = highlight.report;
+      const label = RUBRIC_LABELS[sectionKey] || sectionKey;
+      const difficulty = report.persona?.difficulty || "Medium";
+      const evidence = report.card?.scores?.[sectionKey]?.evidence || "";
+      const reasoning = report.card?.scores?.[sectionKey]?.reasoning || "";
+
+      // Extract the excerpt + anonymize unless manager mode
+      const excerpt = useMemo(() => {
+        const raw = extractSectionExcerpt(report, sectionKey);
+        return managerUnlocked ? raw : anonymizeTranscript(raw, advisorName);
+      }, [report, sectionKey, advisorName, managerUnlocked]);
+
+      const dateStr = new Date(report.createdAt).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+
+      return (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 fade-up"
+          style={{ background: "rgba(0,0,0,0.55)" }}
+          onClick={onClose}
+        >
+          <div
+            className="card max-w-3xl w-full max-h-[88vh] overflow-hidden flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="p-6 border-b shrink-0" style={{ borderColor: "var(--rule)" }}>
+              <div className="flex items-start justify-between gap-4 mb-2">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.25em] text-[var(--gold)] mb-1">Highlight · {label}</div>
+                  <h2 className="font-display text-2xl leading-tight">
+                    {managerUnlocked ? advisorName : "[Advisor]"}
+                  </h2>
+                  <div className="text-xs text-[var(--ink)]/60 mt-1 flex items-center gap-2 flex-wrap">
+                    <span>{dateStr}</span>
+                    <span className="text-[var(--ink)]/30">·</span>
+                    <span style={{
+                      color: difficulty === "Hard" ? "var(--accent)" : difficulty === "Easy" ? "var(--gold-soft)" : "var(--ink)",
+                      fontWeight: 600,
+                    }}>{difficulty} mode</span>
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="font-display text-4xl" style={{ color: "var(--gold)" }}>{highlight.score.toFixed(1)}</div>
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink)]/50">section score</div>
+                </div>
+              </div>
+              <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 rounded flex items-center justify-center text-[var(--ink)]/50 hover:text-[var(--ink)] hover:bg-black/5">✕</button>
+            </div>
+
+            {/* Body — scrollable */}
+            <div className="p-6 overflow-y-auto">
+              {/* Evidence quote */}
+              {evidence && (
+                <div className="card-warm p-4 mb-6">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--gold)] mb-1">Why this scored well</div>
+                  <div className="text-sm italic text-[var(--ink)]/80">{evidence}</div>
+                  {reasoning && (
+                    <div className="text-xs text-[var(--ink)]/60 mt-2 leading-relaxed">{reasoning}</div>
+                  )}
+                </div>
+              )}
+
+              {/* Transcript excerpt */}
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink)]/60 mb-3">
+                Transcript excerpt ({excerpt.length} {excerpt.length === 1 ? "turn" : "turns"})
+              </div>
+              {excerpt.length === 0 ? (
+                <div className="text-sm text-[var(--ink)]/50 italic">No transcript available for this excerpt.</div>
+              ) : (
+                <div className="space-y-3">
+                  {excerpt.map((turn, i) => {
+                    const isAdvisor = turn.role === "advisor";
+                    return (
+                      <div key={i} className={`p-3 rounded text-sm leading-relaxed ${isAdvisor ? "" : "ml-6"}`}
+                        style={{
+                          background: isAdvisor ? "rgba(33, 101, 97, 0.06)" : "rgba(95, 96, 98, 0.05)",
+                          borderLeft: isAdvisor ? "2px solid var(--teal)" : "2px solid var(--rule)",
+                        }}>
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink)]/50 mb-1">
+                          {isAdvisor ? (managerUnlocked ? advisorName : "[Advisor]") : (report.persona?.name || "Prospect")}
+                        </div>
+                        <div>{turn.text}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!managerUnlocked && (
+                <div className="mt-6 p-3 rounded text-[10px] italic text-[var(--ink)]/50" style={{ background: "rgba(0,0,0,0.02)" }}>
+                  Advisor identity has been anonymized. Names and identifying details replaced with [Advisor].
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-6 border-t flex items-center justify-end gap-3 shrink-0" style={{ borderColor: "var(--rule)" }}>
+              {onViewFullReport && (
+                <button onClick={onViewFullReport} className="btn-ghost px-5 py-2.5 rounded text-xs uppercase tracking-[0.18em]">
+                  View Full Report Card →
+                </button>
+              )}
+              <button onClick={onClose} className="btn-primary px-6 py-2.5 rounded text-xs uppercase tracking-[0.18em]">
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -7681,6 +8247,15 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
               onRefresh={loadTeamData}
             />
           )}
+          {view === "highlights" && (
+            <HighlightsView
+              currentUser={user}
+              profiles={teamProfiles}
+              allReports={teamReports}
+              managerUnlocked={managerUnlocked}
+              onViewReport={(id) => { setCameFromManager(managerUnlocked); setActiveReportId(id); setView("report-card"); }}
+            />
+          )}
           {view === "manager" && managerUnlocked && (
             <ManagerView
               profiles={teamProfiles}
@@ -7725,6 +8300,7 @@ The advisor will now ask you questions. Engage as a thoughtful coach.`;
               }}
               user={user}
               allReports={reports}
+              teamReports={teamReports}
               apiKey={apiKey}
               onDelete={handleDeleteReport}
             />
